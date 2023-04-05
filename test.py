@@ -7,19 +7,26 @@ def read_data(file_path):
     datas = []
 
     for item in data['data']:
-        if 'header' in item and 'dialogueInfo' in item['header']:
-            dialogue_info = item['header']['dialogueInfo']
-            if ('topic' in dialogue_info):
-                label = dialogue_info['topic']
+        if 'topic' in item:
+            topic = item['topic']
+
         sentences = []
-        if 'body' in item:
-            body_ = item['body']
-            for i in body_:
+        if 'utterance' in item:
+            sentence = item['utterance']
+            for i in sentence:
                 sentences.append(i['utterance'])
 
-        datas.append((sentences, label))
-    # Print the count
-    print(datas)
+
+        #     if ('topic' in dialogue_info):
+        #         label = dialogue_info['topic']
+        # sentences = []
+        # if 'body' in item:
+        #     body_ = item['body']
+        #     for i in body_:
+        #         sentences.append(i['utterance'])
+        #
+        # datas.append((sentences, label))
+        #
 
 
 read_data("test.json")

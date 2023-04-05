@@ -2,7 +2,7 @@ import json
 
 
 def read_data(file_path):
-    with open(file_path, "r", encoding='utf-8') as f:
+    with open(file_path, "r", encoding='utf-8-sig') as f:
         data = json.load(f)
     datas = []
 
@@ -13,19 +13,8 @@ def read_data(file_path):
         sentences = []
         if 'utterance' in item:
             sentence = item['utterance']
-            sentences.append(sen)
+        datas.append((sentence, topic))
+    return datas
 
 
-        #     if ('topic' in dialogue_info):
-        #         label = dialogue_info['topic']
-        # sentences = []
-        # if 'body' in item:
-        #     body_ = item['body']
-        #     for i in body_:
-        #         sentences.append(i['utterance'])
-        #
-        # datas.append((sentences, label))
-        #
-
-
-read_data("test.json")
+read_data("combined_data.json")

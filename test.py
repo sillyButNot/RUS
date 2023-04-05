@@ -13,8 +13,7 @@ def read_data(file_path):
         sentences = []
         if 'utterance' in item:
             sentence = item['utterance']
-            for i in sentence:
-                sentences.append(i['utterance'])
+            sentences.append(sen)
 
 
         #     if ('topic' in dialogue_info):

@@ -257,7 +257,7 @@ def test(config):
                 if i == bert_tokenizer.sep_token:
                     input_sequence.append(bert_tokenizer.convert_tokens_to_string(until_sep))
                     until_sep = []
-                elif i != 0:
+                elif i != '[CLS]':
                     until_sep.append(i)
 
             # input_sequence = bert_tokenizer.convert_tokens_to_string(
@@ -272,10 +272,12 @@ def test(config):
             print("출력 : {}, 정답 : {}\n".format(predict, correct))
 
     print(score / all)
+    print(score)
+    print(all)
 
 
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output1")
+    output_dir = os.path.join("output_10000")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -283,8 +285,8 @@ if (__name__ == "__main__"):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
-    config = {"mode": "train",
-              "train_data_path": os.path.join("combined_data_train_400.json"),
+    config = {"mode": "test",
+              "train_data_path": os.path.join("combined_data_tran_10000.json"),
               "test_data_path": os.path.join("combined_data_test_re.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,

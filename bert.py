@@ -21,15 +21,12 @@ class SentimentClassifier(BertPreTrainedModel):
         super(SentimentClassifier, self).__init__(config)
 
         # BERT 모델
-        self.bert = AutoModel.from_pretrained("klue/bert-base")
+        self.bert = BertModel(config)
 
-        # 히든 사이즈 768
+        # 히든 사이즈
         self.hidden_size = config.hidden_size
 
-        self.rnn = nn.LSTM(input_size=self.hidden_size, hidden_size=self.hidden_size // 2, dropout=0.3, num_layers=1,
-                           batch_first=True, bidirectional=True)
-        self.dropout = nn.Dropout(0.3)
-        # 분류할 라벨의 개수 2
+        # 분류할 라벨의 개수
         self.num_labels = config.num_labels
 
         self.linear = nn.Linear(in_features=self.hidden_size, out_features=self.num_labels)
@@ -42,23 +39,11 @@ class SentimentClassifier(BertPreTrainedModel):
         # (batch_size, max_lenth, hidden_size)
         bert_output = outputs[0]
 
-        bert_output = self.dropout(bert_output)
-
-        # outputs : (batch,length,2*hidden/2)
-        # hidden_output : (2,batch, hidden/2)
-        outputs, hidden_output = self.rnn(bert_output)
-
-        # print(len(outputs))
         # (batch_size, hidden_size)
-        batch_size, max_length, _ = outputs.shape
+        cls_vector = bert_output[:, 0, :]
 
-        # (batch*length, hidden)
-        re_outputs = outputs.reshape(batch_size * max_length, -1)
-
-        linear_output = self.linear(re_outputs)
-        linear_output = linear_output.reshape(batch_size, max_length, -1)
         # class_output : (batch_size, num_labels)
-        cls_output = linear_output[:, 0, :]
+        cls_output = self.linear(cls_vector)
 
         return cls_output
 
@@ -67,7 +52,7 @@ def read_data(file_path):
     with open(file_path, "r", encoding='utf-8-sig') as f:
         data = json.load(f)
     datas = []
-
+    person_data = []
     for item in data['data']:
         if 'topic' in item:
             topic = item['topic']
@@ -76,8 +61,12 @@ def read_data(file_path):
         if 'utterance' in item:
             sentence = item['utterance']
         datas.append((sentence, topic))
-    return datas
+        personal = []
+        if 'participantID' in item:
+            personal = item['participantID']
+        person_data.append(personal)
 
+    return datas, person_data
 
 
 def read_vocab_data(vocab_data_path):
@@ -96,21 +85,29 @@ def read_vocab_data(vocab_data_path):
     return term2idx, idx2term
 
 
-def convert_data2feature(datas, max_length, tokenizer, label2idx):
+def convert_data2feature(datas, max_length, tokenizer, label2idx, personal):
     input_ids_features, label_id_features = [], []
-
+    x = 0
     for input_sequence, label in datas:
         # CLS, SEP 토큰 추가
+        y = 0
         tokens = [tokenizer.cls_token]
-        tokens += input_sequence
-        tokens = tokens[:max_length - 1]
-        tokens += [tokenizer.sep_token]
+        for sentence in input_sequence:
+            tokens.append(sentence)
+            if y is not (len(personal[x]) - 1):
+                if personal[x][y] != personal[x][y + 1]:
+                    tokens = tokens[:max_length - 1]
+                    tokens += [tokenizer.sep_token]
+            else:
+                tokens += [tokenizer.sep_token]
 
+            y = y + 1
+        x = x + 1
         # word piece들을 대응하는 index로 치환
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
         # padding 생성
-        padding = [tokenizer._convert_token_to_id(tokenizer.pad_token)] * (max_length - len(input_ids))
+        padding = [tokenizer.convert_tokens_to_ids(tokenizer.pad_token)] * (max_length - len(input_ids))
         input_ids += padding
 
         label_id = label2idx[label]
@@ -133,19 +130,21 @@ def train(config):
     setattr(bert_config, "num_labels", config["num_labels"])
 
     # BERT tokenizer 객체 생성
-    bert_tokenizer = AutoTokenizer.from_pretrained("klue/bert-base")
+    bert_tokenizer = AutoTokenizer.from_pretrained(
+        pretrained_model_name_or_path=config["pretrained_model_name_or_path"],
+        cache_dir=config["cache_dir_path"])
 
     # 라벨 딕셔너리 생성
     label2idx, idx2label = read_vocab_data(vocab_data_path=config["label_vocab_data_path"])
 
     # 학습 및 평가 데이터 읽기
-    train_datas = read_data(file_path=config["train_data_path"])
+    train_datas, personal = read_data(file_path=config["train_data_path"])
 
     # 입력 데이터 전처리
     train_input_ids_features, train_label_id_features = convert_data2feature(datas=train_datas,
                                                                              max_length=config["max_length"],
                                                                              tokenizer=bert_tokenizer,
-                                                                             label2idx=label2idx)
+                                                                             label2idx=label2idx, personal=personal)
 
     # 학습 데이터를 batch 단위로 추출하기 위한 DataLoader 객체 생성
     train_dataset = TensorDataset(train_input_ids_features, train_label_id_features)
@@ -209,7 +208,7 @@ def test(config):
 
     # 평가 데이터 읽기
     test_datas = read_data(file_path=config["test_data_path"])
-    test_datas = test_datas[:100]
+    # test_datas = test_datas[:100] #넣어야할까??
 
     # 입력 데이터 전처리
     test_input_ids_features, test_label_id_features = convert_data2feature(datas=test_datas,
@@ -269,16 +268,16 @@ if (__name__ == "__main__"):
         os.makedirs(cache_dir)
 
     config = {"mode": "train",
-              "train_data_path": os.path.join("test.json"),
-              "test_data_path": os.path.join("Validation/행사.json"),
+              "train_data_path": os.path.join("combined_data_re.json"),
+              "test_data_path": os.path.join("combined_data_test.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
-              "pretrained_model_name_or_path": "klue/bert-base",
+              "pretrained_model_name_or_path": "./model/bert-base/",
               "label_vocab_data_path": os.path.join("label_vocab.txt"),
               "num_labels": 9,
               "max_length": 512,
               "epoch": 10,
-              "batch_size": 64
+              "batch_size": 32
               }
 
     if (config["mode"] == "train"):

@@ -10,6 +10,7 @@ import numpy as np
 from transformers import AutoModel, AutoTokenizer
 from transformers import BertConfig
 from tokenization_kobert import KoBertTokenizer
+from torch.utils.data import SequentialSampler
 
 import torch.nn as nn
 from transformers import BertPreTrainedModel, BertModel
@@ -48,7 +49,7 @@ class SentimentClassifier(BertPreTrainedModel):
         return cls_output
 
 
-def read_data(file_path):
+def read_data(file_path, bert_tokenizer):
     with open(file_path, "r", encoding='utf-8-sig') as f:
         data = json.load(f)
     datas = []
@@ -60,7 +61,10 @@ def read_data(file_path):
         sentences = []
         if 'utterance' in item:
             sentence = item['utterance']
-        datas.append((sentence, topic))
+            sentence = bert_tokenizer(sentence)['input_ids']
+            re_sentence = [inner_sentence[1:-1] for inner_sentence in sentence]
+
+            datas.append((re_sentence, topic))
         personal = []
         if 'participantID' in item:
             personal = item['participantID']
@@ -91,23 +95,26 @@ def convert_data2feature(datas, max_length, tokenizer, label2idx, personal):
     for input_sequence, label in datas:
         # CLS, SEP 토큰 추가
         y = 0
-        tokens = [tokenizer.cls_token]
+        tokens = tokenizer.convert_tokens_to_ids([tokenizer.cls_token])
         for sentence in input_sequence:
-            tokens.append(sentence)
+            tokens.extend(sentence)
             if y is not (len(personal[x]) - 1):
                 if personal[x][y] != personal[x][y + 1]:
                     tokens = tokens[:max_length - 1]
-                    tokens += [tokenizer.sep_token]
+                    tokens += tokenizer.convert_tokens_to_ids([tokenizer.sep_token])
             else:
-                tokens += [tokenizer.sep_token]
+                tokens += tokenizer.convert_tokens_to_ids([tokenizer.sep_token])
 
             y = y + 1
         x = x + 1
         # word piece들을 대응하는 index로 치환
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
+        # input_ids = tokenizer.convert_tokens_to_ids(tokens)
+        input_ids = tokens
         # padding 생성
+        if len(input_ids) >= 512:
+            input_ids = input_ids[:512]
         padding = [tokenizer.convert_tokens_to_ids(tokenizer.pad_token)] * (max_length - len(input_ids))
+
         input_ids += padding
 
         label_id = label2idx[label]
@@ -138,7 +145,7 @@ def train(config):
     label2idx, idx2label = read_vocab_data(vocab_data_path=config["label_vocab_data_path"])
 
     # 학습 및 평가 데이터 읽기
-    train_datas, personal = read_data(file_path=config["train_data_path"])
+    train_datas, personal = read_data(file_path=config["train_data_path"], bert_tokenizer=bert_tokenizer)
 
     # 입력 데이터 전처리
     train_input_ids_features, train_label_id_features = convert_data2feature(datas=train_datas,
@@ -195,26 +202,25 @@ def train(config):
 
 def test(config):
     # BERT config 객체 생성
-    bert_config = BertConfig.from_pretrained(pretrained_model_name_or_path=config["output_dir_path"],
+    bert_config = BertConfig.from_pretrained(pretrained_model_name_or_path=config["pretrained_model_name_or_path"],
                                              cache_dir=config["cache_dir_path"])
-
-    # BERT tokenizer 객체 생성 (기존 BERT tokenizer 그대로 사용)
-    bert_tokenizer = KoBertTokenizer.from_pretrained(
+    setattr(bert_config, "num_labels", config["num_labels"])
+    # BERT tokenizer 객체 생성
+    bert_tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=config["pretrained_model_name_or_path"],
         cache_dir=config["cache_dir_path"])
-
+    setattr(bert_config, "num_labels", config["num_labels"])
     # 라벨 딕셔너리 생성
     label2idx, idx2label = read_vocab_data(vocab_data_path=config["label_vocab_data_path"])
 
     # 평가 데이터 읽기
-    test_datas = read_data(file_path=config["test_data_path"])
-    test_datas = test_datas[:100] #넣어야할까??
+    test_datas, personal = read_data(file_path=config["test_data_path"], bert_tokenizer=bert_tokenizer)
 
     # 입력 데이터 전처리
     test_input_ids_features, test_label_id_features = convert_data2feature(datas=test_datas,
                                                                            max_length=config["max_length"],
                                                                            tokenizer=bert_tokenizer,
-                                                                           label2idx=label2idx)
+                                                                           label2idx=label2idx, personal=personal)
 
     # 평가 데이터를 batch 단위로 추출하기 위한 DataLoader 객체 생성
     test_dataset = TensorDataset(test_input_ids_features, test_label_id_features)
@@ -244,8 +250,18 @@ def test(config):
 
         for index in range(len(input_ids)):
             input_tokens = bert_tokenizer.convert_ids_to_tokens(input_ids[index])
-            input_sequence = bert_tokenizer.convert_tokens_to_string(
-                input_tokens[1:input_tokens.index(bert_tokenizer.sep_token)])
+
+            input_sequence = []
+            until_sep = []
+            for i in input_tokens:
+                if i == bert_tokenizer.sep_token:
+                    input_sequence.append(bert_tokenizer.convert_tokens_to_string(until_sep))
+                    until_sep = []
+                elif i != '[CLS]':
+                    until_sep.append(i)
+
+            # input_sequence = bert_tokenizer.convert_tokens_to_string(
+            #     input_tokens[i:input_tokens.index(bert_tokenizer.sep_token)])
             predict = idx2label[hypothesis[index]]
             correct = idx2label[label_id[index]]
             all = all + 1
@@ -255,11 +271,13 @@ def test(config):
             print("입력 : {}".format(input_sequence))
             print("출력 : {}, 정답 : {}\n".format(predict, correct))
 
+    print(score / all)
     print(score)
+    print(all)
 
 
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output")
+    output_dir = os.path.join("output_10000")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -267,9 +285,9 @@ if (__name__ == "__main__"):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
-    config = {"mode": "test",
-              "train_data_path": os.path.join("combined_data_re.json"),
-              "test_data_path": os.path.join("combined_data_test.json"),
+    config = {"mode": "train",
+              "train_data_path": os.path.join("combined_data_train_10000.json"),
+              "test_data_path": os.path.join("combined_data_test_50.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
               "pretrained_model_name_or_path": "./model/bert-base/",

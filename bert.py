@@ -285,9 +285,9 @@ if (__name__ == "__main__"):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
-    config = {"mode": "train",
-              "train_data_path": os.path.join("combined_data_train_10000.json"),
-              "test_data_path": os.path.join("combined_data_test_50.json"),
+    config = {"mode": "test",
+              "train_data_path": os.path.join("combined_data_tran_10000.json"),
+              "test_data_path": os.path.join("combined_data_test_re.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
               "pretrained_model_name_or_path": "./model/bert-base/",

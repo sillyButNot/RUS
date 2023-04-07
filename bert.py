@@ -208,7 +208,7 @@ def test(config):
 
     # 평가 데이터 읽기
     test_datas = read_data(file_path=config["test_data_path"])
-    # test_datas = test_datas[:100] #넣어야할까??
+    test_datas = test_datas[:100] #넣어야할까??
 
     # 입력 데이터 전처리
     test_input_ids_features, test_label_id_features = convert_data2feature(datas=test_datas,

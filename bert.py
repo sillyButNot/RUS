@@ -267,7 +267,7 @@ if (__name__ == "__main__"):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
-    config = {"mode": "train",
+    config = {"mode": "test",
               "train_data_path": os.path.join("combined_data_re.json"),
               "test_data_path": os.path.join("combined_data_test.json"),
               "output_dir_path": output_dir,

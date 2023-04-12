@@ -14,7 +14,6 @@ from torch.utils.data import SequentialSampler
 
 import torch.nn as nn
 from transformers import BertPreTrainedModel, BertModel
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
 
 class SentimentClassifier(BertPreTrainedModel):
@@ -24,30 +23,58 @@ class SentimentClassifier(BertPreTrainedModel):
 
         # BERT 모델
         self.bert = BertModel(config)
-
+        self.max_length = 512
         # 히든 사이즈
         self.hidden_size = config.hidden_size
 
         # 분류할 라벨의 개수
         self.num_labels = config.num_labels
 
-        self.linear = nn.Linear(in_features=self.hidden_size, out_features=self.num_labels)
+        # 주제를 랜덤으로 라벨임베딩해줌
+        self.label_embedding_matrix = nn.Parameter(
+            torch.randn(size=(self.num_labels, self.hidden_size,), dtype=torch.float32, requires_grad=True))
 
+        self.first_multi_head_attention = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8, batch_first=True)
+
+        self.linear = nn.Linear(in_features=self.hidden_size, out_features=self.num_labels)
+        self.softmax = nn.Softmax(dim=-1)
     def forward(self, input_ids):
+        batch_size = input_ids.size()[0]
+
         outputs = self.bert(input_ids=input_ids)
 
         # BERT 출력에서 CLS에 대응하는 벡터 표현 추출
         # 선형 함수를 사용하여 예측 확률 분포로 변환
+
         # (batch_size, max_lenth, hidden_size)
         bert_output = outputs[0]
 
+        # (num_labels, hidden) -> (1. num_labels, hidden)
+        label_embedding = self.label_embedding_matrix.clone().unsqueeze(dim=0)
+
+        # (1,number_labels, hidden) -> (batch, num_labels, hidden)
+        label_embedding = label_embedding.repeat(batch_size, 1, 1)
+
+        # first_attention_outputs : (batch, max_length, hidden)
+        # first_attention_weights : (batch, max_length, num_labels)
+        first_attention_outputs, first_attention_weights = self.first_multi_head_attention(query=bert_output,
+                                                                                           key=label_embedding,
+                                                                                           value=label_embedding)
+
+
         # (batch_size, hidden_size)
-        cls_vector = bert_output[:, 0, :]
+        # cls_vector = bert_output[:, 0, :]
 
         # class_output : (batch_size, num_labels)
-        cls_output = self.linear(cls_vector)
+        #(batch, max_length, hidden) -> (batch, max_length, num_labels)
+        cls_output = self.linear(first_attention_outputs)
+        cls_output = cls_output.view(-1, self.num_labels)
+        probs = self.softmax(cls_output)
+        probs = probs.view(batch_size, self.max_length, self.num_labels)
+        _, prodictions = torch.max(probs, dim = 1)
 
-        return cls_output
+        # cls_output = self.softmax(cls_output).argmax(dim = -1)
+        return prodictions
 
 
 def read_data(file_path, bert_tokenizer):
@@ -237,9 +264,6 @@ def test(config):
     model.eval()
     score = 0
     all = 0
-    y_true = []
-    y_pred = []
-
     for batch in test_dataloader:
         batch = tuple(t.cuda() for t in batch)
         input_ids, label_id = batch
@@ -276,16 +300,14 @@ def test(config):
             else:
                 print("입력 : {}".format(input_sequence))
                 print("출력 : {}, 정답 : {}\n".format(predict, correct))
-            y_pred.append(predict)
-            y_true.append(correct)
 
     print(score / all)
     print(score)
     print(all)
-    print(classification_report(y_true, y_pred))
+
 
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output_10000")
+    output_dir = os.path.join("output_attention")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -293,8 +315,8 @@ if (__name__ == "__main__"):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
-    config = {"mode": "test",
-              "train_data_path": os.path.join("combined_data_train_10000.json"),
+    config = {"mode": "train",
+              "train_data_path": os.path.join("combined_data_train_400.json"),
               "test_data_path": os.path.join("combined_data_test_re.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,

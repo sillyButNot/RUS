@@ -34,10 +34,12 @@ class SentimentClassifier(BertPreTrainedModel):
         self.label_embedding_matrix = nn.Parameter(
             torch.randn(size=(self.num_labels, self.hidden_size,), dtype=torch.float32, requires_grad=True))
 
-        self.first_multi_head_attention = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8, batch_first=True)
+        self.first_multi_head_attention = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8,
+                                                                batch_first=True)
 
         self.linear = nn.Linear(in_features=self.hidden_size, out_features=self.num_labels)
         self.softmax = nn.Softmax(dim=-1)
+
     def forward(self, input_ids):
         batch_size = input_ids.size()[0]
 
@@ -55,28 +57,30 @@ class SentimentClassifier(BertPreTrainedModel):
         # (1,number_labels, hidden) -> (batch, num_labels, hidden)
         label_embedding = label_embedding.repeat(batch_size, 1, 1)
 
-        # first_attention_outputs : (batch, max_length, hidden)
-        # first_attention_weights : (batch, max_length, num_labels)
-        first_attention_outputs, first_attention_weights = self.first_multi_head_attention(query=bert_output,
-                                                                                           key=label_embedding,
-                                                                                           value=label_embedding)
+        # 패딩 마스크
+        padding_mask = input_ids.eq(self.bert.tokenizer.pad_token_id).unsqueeze(-1)
 
-        #각 토큰에 대한 분포가 나오니까 512개 그러면 그것들 근데 패딩을 빼고 계산해야함
-        # 이때 결과적으로 마지막 값은 batch, num_labels 를 쓰면 됨 왜냐면 어떤 확률 분포???
+        # (batch, max_length, hidden)
+        bert_output_without_padding = bert_output * padding_mask
+        # first_attention_outputs : (batch, current_length, hidden)
+        # first_attention_weights : (batch, current_length, num_labels)
+        first_attention_outputs, first_attention_weights = self.first_multi_head_attention(
+            query=bert_output_without_padding,
+            key=label_embedding,
+            value=label_embedding)
 
-        # (batch_size, hidden_size)
-        # cls_vector = bert_output[:, 0, :]
+        #(batch, current_length, hidden) -> (batch, current_length, num_labels)
+        linear_output = self.linear(first_attention_outputs)
+        first_attention_outputs = first_attention_outputs.transpose(1, 2)
 
-        # class_output : (batch_size, num_labels)
-        #(batch, max_length, hidden) -> (batch, max_length, num_labels)
-        cls_output = self.linear(first_attention_outputs)
-        cls_output = cls_output.view(-1, self.num_labels)
-        # probs = self.softmax(cls_output)
-        # probs = probs.view(batch_size, self.max_length, self.num_labels)
-        # _, predictions = torch.max(probs, dim = 1)
+        #(batch, current_length, num_labels)
+        probs = self.softmax(first_attention_outputs)
 
-        # cls_output = self.softmax(cls_output).argmax(dim = -1)
-        return cls_output
+        # (batch, current_length, num_labels) -> (batch, num_labels)
+        topics = probs.sum(dim=1)
+
+
+        return topics
 
 
 def read_data(file_path, bert_tokenizer):
@@ -213,12 +217,11 @@ def train(config):
             # hypothesis : [batch, num_labels]
             # 모델 예측 결과
 
-            #(batch*max_length, num_labels)
+            # (batch, num_labels)
             hypothesis = model(input_ids)
-            labels_id_flat = label_id.flatten()
 
             # loss 계산
-            loss = loss_func(hypothesis, labels_id_flat)
+            loss = loss_func(hypothesis, label_id)
 
             # loss 값으로부터 모델 내부 각 매개변수에 대하여 gradient 계산
             loss.backward()

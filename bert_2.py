@@ -58,27 +58,34 @@ class SentimentClassifier(BertPreTrainedModel):
         label_embedding = label_embedding.repeat(batch_size, 1, 1)
 
         # 패딩 마스크
-        padding_mask = input_ids.eq(self.bert.tokenizer.pad_token_id).unsqueeze(-1)
+        # (batch_size, max_lenth, hidden_size) -> (batch_size, max_length)
 
-        # (batch, max_length, hidden)
-        bert_output_without_padding = bert_output * padding_mask
-        # first_attention_outputs : (batch, current_length, hidden)
-        # first_attention_weights : (batch, current_length, num_labels)
+        padding_mask = (input_ids != 0).float()
+        padding_mask = padding_mask.unsqueeze(dim = -1)
+        padding_mask = padding_mask.repeat(1,1,self.num_labels)
+
+
+            # (batch, max_length, hidden)
+        # first_attention_outputs : (batch, max_length, hidden) (batch, hidden, max_length
+        # first_attention_weights : (batch, max_length, num_labels)
         first_attention_outputs, first_attention_weights = self.first_multi_head_attention(
-            query=bert_output_without_padding,
+            query=bert_output,
             key=label_embedding,
             value=label_embedding)
 
-        #(batch, current_length, hidden) -> (batch, current_length, num_labels)
+        # (batch, max_length, hidden) -> (batch, max_length, num_labels)
         linear_output = self.linear(first_attention_outputs)
-        first_attention_outputs = first_attention_outputs.transpose(1, 2)
 
-        #(batch, current_length, num_labels)
-        probs = self.softmax(first_attention_outputs)
 
+        #(batch, max_length, num_labels)
+        probs = self.softmax(linear_output)
+
+
+        #(batch_size, max_length) -> (batch_size, max_length, labels)
+        # padding_mask = padding_mask.repeat(1, 1,self.num_labels)
+        probs = probs*padding_mask
         # (batch, current_length, num_labels) -> (batch, num_labels)
         topics = probs.sum(dim=1)
-
 
         return topics
 
@@ -323,7 +330,7 @@ if (__name__ == "__main__"):
         os.makedirs(cache_dir)
 
     config = {"mode": "train",
-              "train_data_path": os.path.join("combined_data_train_400.json"),
+              "train_data_path": os.path.join("combined_data_test_50.json"),
               "test_data_path": os.path.join("combined_data_test_re.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,

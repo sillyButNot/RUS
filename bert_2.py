@@ -61,6 +61,8 @@ class SentimentClassifier(BertPreTrainedModel):
                                                                                            key=label_embedding,
                                                                                            value=label_embedding)
 
+        #각 토큰에 대한 분포가 나오니까 512개 그러면 그것들 근데 패딩을 빼고 계산해야함
+        # 이때 결과적으로 마지막 값은 batch, num_labels 를 쓰면 됨 왜냐면 어떤 확률 분포???
 
         # (batch_size, hidden_size)
         # cls_vector = bert_output[:, 0, :]
@@ -69,12 +71,12 @@ class SentimentClassifier(BertPreTrainedModel):
         #(batch, max_length, hidden) -> (batch, max_length, num_labels)
         cls_output = self.linear(first_attention_outputs)
         cls_output = cls_output.view(-1, self.num_labels)
-        probs = self.softmax(cls_output)
-        probs = probs.view(batch_size, self.max_length, self.num_labels)
-        _, prodictions = torch.max(probs, dim = 1)
+        # probs = self.softmax(cls_output)
+        # probs = probs.view(batch_size, self.max_length, self.num_labels)
+        # _, predictions = torch.max(probs, dim = 1)
 
         # cls_output = self.softmax(cls_output).argmax(dim = -1)
-        return prodictions
+        return cls_output
 
 
 def read_data(file_path, bert_tokenizer):
@@ -211,10 +213,12 @@ def train(config):
             # hypothesis : [batch, num_labels]
             # 모델 예측 결과
 
+            #(batch*max_length, num_labels)
             hypothesis = model(input_ids)
+            labels_id_flat = label_id.flatten()
 
             # loss 계산
-            loss = loss_func(hypothesis, label_id)
+            loss = loss_func(hypothesis, labels_id_flat)
 
             # loss 값으로부터 모델 내부 각 매개변수에 대하여 gradient 계산
             loss.backward()

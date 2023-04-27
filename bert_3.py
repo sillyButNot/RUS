@@ -13,6 +13,7 @@ from tokenization_kobert import KoBertTokenizer
 from torch.utils.data import SequentialSampler
 import torch.nn.functional as F
 from transformers import BertPreTrainedModel, BertModel
+from tqdm import tqdm
 
 
 class SentimentClassifier(BertPreTrainedModel):
@@ -76,7 +77,7 @@ class SentimentClassifier(BertPreTrainedModel):
         linear_output = self.linear(first_attention_outputs)
 
         # (batch, max_length, num_labels)
-        probs = self.log_softmax(linear_output,dim=-1)
+        probs = self.log_softmax(linear_output, dim=-1)
 
         # (batch_size, max_length) -> (batch_size, max_length, labels)
         # padding_mask = padding_mask.repeat(1, 1,self.num_labels)
@@ -96,7 +97,7 @@ def read_data(file_path, bert_tokenizer):
         data = json.load(f)
     datas = []
     person_data = []
-    for item in data['data']:
+    for item in tqdm(data['data'], desc='read_data'):
         if 'topic' in item:
             topic = item['topic']
 
@@ -134,7 +135,7 @@ def read_vocab_data(vocab_data_path):
 def convert_data2feature(datas, max_length, tokenizer, label2idx, personal):
     input_ids_features, label_id_features = [], []
     x = 0
-    for input_sequence, label in datas:
+    for input_sequence, label in tqdm(datas, desc='convert_data2feature'):
         # CLS, SEP 토큰 추가
         y = 0
         tokens = tokenizer.convert_tokens_to_ids([tokenizer.cls_token])
@@ -215,7 +216,7 @@ def train(config):
         model.train()
 
         total_loss = []
-        for batch in train_dataloader:
+        for i,batch in enumerate(train_dataloader):
             batch = tuple(t.cuda() for t in batch)
             input_ids, label_id = batch
 
@@ -238,12 +239,12 @@ def train(config):
 
             # batch 단위 loss 값 저장
             total_loss.append(loss.data.item())
-            print("배치")
 
+            print("Epoch [{}/{}], Batch [{}/{}], Loss: {:.4f}".format(epoch + 1, config["epoch"], i + 1, len(train_dataloader), loss.item()))
         bert_config.save_pretrained(save_directory=config["output_dir_path"])
         model.save_pretrained(save_directory=config["output_dir_path"])
 
-        print("Average loss : {}".format(np.mean(total_loss)))
+        print("Epoch [{}/{}], Average loss : {:.4f}".format(epoch + 1, config["epoch"], np.mean(total_loss)))
 
 
 def test(config):

@@ -39,7 +39,7 @@ class SentimentClassifier(BertPreTrainedModel):
         self.first_multi_head_attention = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8,
                                                                 batch_first=True)
 
-        self.linear = nn.Linear(in_features=self.hidden_size, out_features=self.num_labels)
+        self.linear = nn.Linear(in_features=self.hidden_size * 2, out_features=self.num_labels)
         self.log_softmax = nn.functional.log_softmax
 
     def forward(self, input_ids):
@@ -75,8 +75,9 @@ class SentimentClassifier(BertPreTrainedModel):
             key=label_embedding,
             value=label_embedding)
 
-        # (batch, max_length, hidden) -> (batch, max_length, num_labels)
-        linear_output = self.linear(first_attention_outputs)
+        concat_output = torch.cat((first_attention_outputs, bert_output), dim=-1)
+        # (batch, max_length, hidden*2) -> (batch, max_length, num_labels)
+        linear_output = self.linear(concat_output)
 
         # (batch, max_length, num_labels)
         probs = self.log_softmax(linear_output, dim=-1)
@@ -217,15 +218,15 @@ def train(config):
 
     start_epoch = 0
 
-    # if config["checkpoint_path"] is not None:
-    #     checkpoint = torch.load(config["checkpoint_path"], map_location=torch.device('cuda'))
-    #
-    #     model.load_state_dict(checkpoint['model_state_dict'])
-    #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    #     start_epoch = checkpoint['epoch']
-    #
-    #     print("Loaded checkpoint from: {}".format(config["checkpoint_path"]))
-    #     print("Resuming from epoch {}".format(start_epoch))
+    if config["checkpoint_path"] is not None:
+        checkpoint = torch.load(config["checkpoint_path"], map_location=torch.device('cuda'))
+
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']
+
+        print("Loaded checkpoint from: {}".format(config["checkpoint_path"]))
+        print("Resuming from epoch {}".format(start_epoch))
 
     for epoch in range(start_epoch, config["epoch"]):
         model.train()
@@ -258,12 +259,13 @@ def train(config):
             print("Epoch [{}/{}], Batch [{}/{}], Loss: {:.4f}".format(epoch + 1, config["epoch"], step + 1,
                                                                       len(train_dataloader), loss.item()))
 
-
-        save_dir = os.path.join(config["output_dir_path"], "epoch-{}".format(epoch+1))
+        save_dir = os.path.join(config["output_dir_path"], "epoch-{}".format(epoch + 1))
         bert_config.save_pretrained(save_directory=save_dir)
         model.save_pretrained(save_directory=save_dir)
         save_checkpoint(save_dir=save_dir, model=model, optimizer=optimizer, epoch=epoch + 1)
         print("Epoch [{}/{}], Average loss : {:.4f}".format(epoch + 1, config["epoch"], np.mean(total_loss)))
+        evaluate(config, model, bert_tokenizer)
+
 
 def save_checkpoint(save_dir, model, optimizer, epoch):
     state_dict = {'model_state_dict': model.state_dict(),
@@ -271,6 +273,7 @@ def save_checkpoint(save_dir, model, optimizer, epoch):
                   'epoch': epoch}
     filepath = os.path.join(save_dir, 'epoch-checkpoint-{}'.format(epoch))
     torch.save(state_dict, filepath)
+
 
 def evaluate(config, model, bert_tokenizer):
     # BERT config 객체 생성
@@ -344,6 +347,7 @@ def evaluate(config, model, bert_tokenizer):
     print(score)
     print(all)
     print(classification_report(y_true, y_pred))
+
 
 def test(config):
     # BERT config 객체 생성
@@ -428,7 +432,7 @@ def test(config):
 
 
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output_3")
+    output_dir = os.path.join("output_5")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -437,7 +441,7 @@ if (__name__ == "__main__"):
         os.makedirs(cache_dir)
 
     config = {"mode": "train",
-              "train_data_path": os.path.join("combined_data_train_10000.json"),
+              "train_data_path": os.path.join("combined_data_test_100.json"),
               "test_data_path": os.path.join("combined_data_test_100.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
@@ -445,9 +449,9 @@ if (__name__ == "__main__"):
               "label_vocab_data_path": os.path.join("label_vocab.txt"),
               "num_labels": 9,
               "max_length": 512,
-              "epoch": 10,
+              "epoch": 5,
               "batch_size": 64,
-              "checkpoint_path":None
+              "checkpoint_path": None
               }
 
     if (config["mode"] == "train"):

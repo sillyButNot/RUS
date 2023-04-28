@@ -11,6 +11,7 @@ from transformers import AutoModel, AutoTokenizer
 from transformers import BertConfig
 from tokenization_kobert import KoBertTokenizer
 from torch.utils.data import SequentialSampler
+from tqdm import tqdm
 
 import torch.nn as nn
 from transformers import BertPreTrainedModel, BertModel
@@ -38,7 +39,7 @@ class SentimentClassifier(BertPreTrainedModel):
         self.first_multi_head_attention = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8,
                                                                 batch_first=True)
 
-        self.linear = nn.Linear(in_features=self.hidden_size, out_features=self.num_labels)
+        self.linear = nn.Linear(in_features=self.hidden_size * 2, out_features=self.num_labels)
         self.log_softmax = nn.functional.log_softmax
 
     def forward(self, input_ids):
@@ -74,11 +75,12 @@ class SentimentClassifier(BertPreTrainedModel):
             key=label_embedding,
             value=label_embedding)
 
-        # (batch, max_length, hidden) -> (batch, max_length, num_labels)
-        linear_output = self.linear(first_attention_outputs)
+        concat_output = torch.cat((first_attention_outputs, bert_output), dim=-1)
+        # (batch, max_length, hidden*2) -> (batch, max_length, num_labels)
+        linear_output = self.linear(concat_output)
 
         # (batch, max_length, num_labels)
-        probs = self.log_softmax(linear_output,dim=-1)
+        probs = self.log_softmax(linear_output, dim=-1)
 
         # (batch_size, max_length) -> (batch_size, max_length, labels)
         # padding_mask = padding_mask.repeat(1, 1,self.num_labels)
@@ -98,7 +100,7 @@ def read_data(file_path, bert_tokenizer):
         data = json.load(f)
     datas = []
     person_data = []
-    for item in data['data']:
+    for item in tqdm(data['data'], desc='read_data'):
         if 'topic' in item:
             topic = item['topic']
 
@@ -136,7 +138,7 @@ def read_vocab_data(vocab_data_path):
 def convert_data2feature(datas, max_length, tokenizer, label2idx, personal):
     input_ids_features, label_id_features = [], []
     x = 0
-    for input_sequence, label in datas:
+    for input_sequence, label in tqdm(datas, desc='convert_data2feature'):
         # CLS, SEP 토큰 추가
         y = 0
         tokens = tokenizer.convert_tokens_to_ids([tokenizer.cls_token])
@@ -213,11 +215,24 @@ def train(config):
 
     # 모델 학습을 위한 optimizer
     optimizer = optim.Adam(model.parameters(), lr=2e-5)
-    for epoch in range(config["epoch"]):
+
+    start_epoch = 0
+
+    if config["checkpoint_path"] is not None:
+        checkpoint = torch.load(config["checkpoint_path"], map_location=torch.device('cuda'))
+
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']
+
+        print("Loaded checkpoint from: {}".format(config["checkpoint_path"]))
+        print("Resuming from epoch {}".format(start_epoch))
+
+    for epoch in range(start_epoch, config["epoch"]):
         model.train()
 
         total_loss = []
-        for batch in train_dataloader:
+        for step, batch in enumerate(train_dataloader):
             batch = tuple(t.cuda() for t in batch)
             input_ids, label_id = batch
 
@@ -240,12 +255,98 @@ def train(config):
 
             # batch 단위 loss 값 저장
             total_loss.append(loss.data.item())
-            print("배치")
 
-        bert_config.save_pretrained(save_directory=config["output_dir_path"])
-        model.save_pretrained(save_directory=config["output_dir_path"])
+            print("Epoch [{}/{}], Batch [{}/{}], Loss: {:.4f}".format(epoch + 1, config["epoch"], step + 1,
+                                                                      len(train_dataloader), loss.item()))
 
-        print("Average loss : {}".format(np.mean(total_loss)))
+        save_dir = os.path.join(config["output_dir_path"], "epoch-{}".format(epoch + 1))
+        bert_config.save_pretrained(save_directory=save_dir)
+        model.save_pretrained(save_directory=save_dir)
+        save_checkpoint(save_dir=save_dir, model=model, optimizer=optimizer, epoch=epoch + 1)
+        print("Epoch [{}/{}], Average loss : {:.4f}".format(epoch + 1, config["epoch"], np.mean(total_loss)))
+        evaluate(config, model, bert_tokenizer)
+
+
+def save_checkpoint(save_dir, model, optimizer, epoch):
+    state_dict = {'model_state_dict': model.state_dict(),
+                  'optimizer_state_dict': optimizer.state_dict(),
+                  'epoch': epoch}
+    filepath = os.path.join(save_dir, 'epoch-checkpoint-{}'.format(epoch))
+    torch.save(state_dict, filepath)
+
+
+def evaluate(config, model, bert_tokenizer):
+    # BERT config 객체 생성
+    bert_config = BertConfig.from_pretrained(pretrained_model_name_or_path=config["pretrained_model_name_or_path"],
+                                             cache_dir=config["cache_dir_path"])
+
+    # 라벨 딕셔너리 생성
+    label2idx, idx2label = read_vocab_data(vocab_data_path=config["label_vocab_data_path"])
+
+    # 평가 데이터 읽기
+    test_datas, personal = read_data(file_path=config["test_data_path"], bert_tokenizer=bert_tokenizer)
+
+    # 입력 데이터 전처리
+    test_input_ids_features, test_label_id_features = convert_data2feature(datas=test_datas,
+                                                                           max_length=config["max_length"],
+                                                                           tokenizer=bert_tokenizer,
+                                                                           label2idx=label2idx, personal=personal)
+
+    # 평가 데이터를 batch 단위로 추출하기 위한 DataLoader 객체 생성
+    test_dataset = TensorDataset(test_input_ids_features, test_label_id_features)
+    test_dataloader = DataLoader(dataset=test_dataset, batch_size=config["batch_size"],
+                                 sampler=SequentialSampler(test_dataset))
+
+    # 학습한 모델 파일로부터 가중치 불러옴
+    model.eval()
+    score = 0
+    all = 0
+    y_true = []
+    y_pred = []
+
+    for batch in test_dataloader:
+        batch = tuple(t.cuda() for t in batch)
+        input_ids, label_id = batch
+
+        with torch.no_grad():
+            # 모델 예측 결과
+            hypothesis = model(input_ids)
+            # 모델의 출력값에 softmax와 argmax 함수를 적용
+            hypothesis = torch.argmax(torch.softmax(hypothesis, dim=-1), dim=-1)
+
+        # Tensor를 리스트로 변경
+        hypothesis = hypothesis.cpu().detach().numpy().tolist()
+        label_id = label_id.cpu().detach().numpy().tolist()
+
+        for index in range(len(input_ids)):
+            input_tokens = bert_tokenizer.convert_ids_to_tokens(input_ids[index])
+
+            input_sequence = []
+            until_sep = []
+            for i in input_tokens:
+                if i == bert_tokenizer.sep_token:
+                    input_sequence.append(bert_tokenizer.convert_tokens_to_string(until_sep))
+                    until_sep = []
+                elif i != '[CLS]':
+                    until_sep.append(i)
+
+            # input_sequence = bert_tokenizer.convert_tokens_to_string(
+            #     input_tokens[i:input_tokens.index(bert_tokenizer.sep_token)])
+            predict = idx2label[hypothesis[index]]
+            correct = idx2label[label_id[index]]
+            all = all + 1
+            if (predict == correct):
+                score = score + 1
+            # else:
+            #     print("입력 : {}".format(input_sequence))
+            #     print("출력 : {}, 정답 : {}\n".format(predict, correct))
+            y_pred.append(predict)
+            y_true.append(correct)
+
+    print(score / all)
+    print(score)
+    print(all)
+    print(classification_report(y_true, y_pred))
 
 
 def test(config):
@@ -331,7 +432,7 @@ def test(config):
 
 
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output_2")
+    output_dir = os.path.join("output_5/epoch-1")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -341,15 +442,16 @@ if (__name__ == "__main__"):
 
     config = {"mode": "test",
               "train_data_path": os.path.join("combined_data_train_10000.json"),
-              "test_data_path": os.path.join("combined_data_test_re.json"),
+              "test_data_path": os.path.join("combined_data_test_100.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
               "pretrained_model_name_or_path": "./model/bert-base/",
               "label_vocab_data_path": os.path.join("label_vocab.txt"),
               "num_labels": 9,
               "max_length": 512,
-              "epoch": 10,
-              "batch_size": 32
+              "epoch": 5,
+              "batch_size": 64,
+              "checkpoint_path": None
               }
 
     if (config["mode"] == "train"):

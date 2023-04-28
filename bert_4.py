@@ -76,23 +76,19 @@ class SentimentClassifier(BertPreTrainedModel):
 
         #상위 3개 값만 놔두고 나머지 확률값은 0으로 만듬
         topk_values, topk_indices = torch.topk(first_attention_weights, k=3, dim=-1)
-
-        # set all values in first_attention_weights to 0
         first_attention_weights.zero_()
-
-        # set the top 3 values in each row to their original values
         first_attention_weights.scatter_(-1, topk_indices, topk_values)
 
 
-        # (batch, max_length, hidden) -> (batch, max_length, num_labels)
-        linear_output = self.linear(first_attention_outputs)
-
-        # (batch, max_length, num_labels)
-        probs = self.log_softmax(linear_output, dim=-1)
+        # # (batch, max_length, hidden) -> (batch, max_length, num_labels)
+        # linear_output = self.linear(first_attention_outputs)
+        #
+        # # (batch, max_length, num_labels)
+        # probs = self.log_softmax(linear_output, dim=-1)
 
         # (batch_size, max_length) -> (batch_size, max_length, labels)
         # padding_mask = padding_mask.repeat(1, 1,self.num_labels)
-        probs = probs * padding_mask
+        probs = first_attention_weights * padding_mask
 
         # 안되면 sum 말고 average
         # (batch, current_length, num_labels) -> (batch, num_labels)
@@ -101,7 +97,6 @@ class SentimentClassifier(BertPreTrainedModel):
         topics = topics / max_length
 
         return topics
-
 
 def read_data(file_path, bert_tokenizer):
     with open(file_path, "r", encoding='utf-8-sig') as f:
@@ -219,11 +214,24 @@ def train(config):
                                                 cache_dir=config["cache_dir_path"], config=bert_config).cuda()
 
     # loss를 계산하기 위한 함수
-    loss_func = nn.NLLLoss()
+    loss_func = nn.CrossEntropyLoss() #softmax를 거지치지 않은 것이기 때문?
 
     # 모델 학습을 위한 optimizer
     optimizer = optim.Adam(model.parameters(), lr=2e-5)
-    for epoch in range(config["epoch"]):
+
+    start_epoch = 0
+
+    if config["checkpoint_path"] is not None:
+        checkpoint = torch.load(config["checkpoint_path"], map_location=torch.device('cuda'))
+
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1  # 시작 epoch를 이전 상태에서 +1로 설정
+
+        print("Loaded checkpoint from: {}".format(config["checkpoint_path"]))
+        print("Resuming from epoch {}".format(start_epoch))
+
+    for epoch in range(start_epoch, config["epoch"]):
         model.train()
 
         total_loss = []
@@ -254,24 +262,98 @@ def train(config):
             print("Epoch [{}/{}], Batch [{}/{}], Loss: {:.4f}".format(epoch + 1, config["epoch"], step + 1,
                                                                       len(train_dataloader), loss.item()))
 
-            if args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                # 모델 저장 디렉토리 생성
-                output_dir = os.path.join(config["output_dir_path"], "checkpoint")
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
 
-                # 학습된 가중치 및 vocab 저장
-                model.save_pretrained(save_directory=output_dir)
-                bert_config.save_pretrained(output_dir)
-                torch.save(args, os.path.join(output_dir, "training_args.bin"))
-                logger.info("Saving model checkpoint to %s", output_dir)
-
-        save_dir = os.path.join(config["output_dir_path"], "epoch-", epoch)
+        save_dir = os.path.join(config["output_dir_path"], "epoch-{}".format(epoch+1))
         bert_config.save_pretrained(save_directory=save_dir)
         model.save_pretrained(save_directory=save_dir)
-
+        save_checkpoint(save_dir=save_dir, model=model, optimizer=optimizer, epoch=epoch + 1)
         print("Epoch [{}/{}], Average loss : {:.4f}".format(epoch + 1, config["epoch"], np.mean(total_loss)))
+        print("모델 저장 완료, 평가")
+        evaluate(config, model, bert_tokenizer, epoch)
+def save_checkpoint(save_dir, model, optimizer, epoch):
+    state_dict = {'model_state_dict': model.state_dict(),
+                  'optimizer_state_dict': optimizer.state_dict(),
+                  'epoch': epoch}
+    filepath = os.path.join(save_dir, 'epoch-checkpoint-{}'.format(epoch))
+    torch.save(state_dict, filepath)
 
+def evaluate(config, model, bert_tokenizer, epoch):
+    # BERT config 객체 생성
+    bert_config = BertConfig.from_pretrained(pretrained_model_name_or_path=config["pretrained_model_name_or_path"],
+                                             cache_dir=config["cache_dir_path"])
+
+    # 라벨 딕셔너리 생성
+    label2idx, idx2label = read_vocab_data(vocab_data_path=config["label_vocab_data_path"])
+
+    # 평가 데이터 읽기
+    test_datas, personal = read_data(file_path=config["test_data_path"], bert_tokenizer=bert_tokenizer)
+
+    # 입력 데이터 전처리
+    test_input_ids_features, test_label_id_features = convert_data2feature(datas=test_datas,
+                                                                           max_length=config["max_length"],
+                                                                           tokenizer=bert_tokenizer,
+                                                                           label2idx=label2idx, personal=personal)
+
+    # 평가 데이터를 batch 단위로 추출하기 위한 DataLoader 객체 생성
+    test_dataset = TensorDataset(test_input_ids_features, test_label_id_features)
+    test_dataloader = DataLoader(dataset=test_dataset, batch_size=config["batch_size"],
+                                 sampler=SequentialSampler(test_dataset))
+
+    # 학습한 모델 파일로부터 가중치 불러옴
+    model.eval()
+    score = 0
+    all = 0
+    y_true = []
+    y_pred = []
+
+    for batch in test_dataloader:
+        batch = tuple(t.cuda() for t in batch)
+        input_ids, label_id = batch
+
+        with torch.no_grad():
+            # 모델 예측 결과
+            hypothesis = model(input_ids)
+            # 모델의 출력값에 softmax와 argmax 함수를 적용
+            hypothesis = torch.argmax(torch.softmax(hypothesis, dim=-1), dim=-1)
+
+        # Tensor를 리스트로 변경
+        hypothesis = hypothesis.cpu().detach().numpy().tolist()
+        label_id = label_id.cpu().detach().numpy().tolist()
+
+        for index in range(len(input_ids)):
+            input_tokens = bert_tokenizer.convert_ids_to_tokens(input_ids[index])
+
+            input_sequence = []
+            until_sep = []
+            for i in input_tokens:
+                if i == bert_tokenizer.sep_token:
+                    input_sequence.append(bert_tokenizer.convert_tokens_to_string(until_sep))
+                    until_sep = []
+                elif i != '[CLS]':
+                    until_sep.append(i)
+
+            # input_sequence = bert_tokenizer.convert_tokens_to_string(
+            #     input_tokens[i:input_tokens.index(bert_tokenizer.sep_token)])
+            predict = idx2label[hypothesis[index]]
+            correct = idx2label[label_id[index]]
+            all = all + 1
+            if (predict == correct):
+                score = score + 1
+            # else:
+            #     print("입력 : {}".format(input_sequence))
+            #     print("출력 : {}, 정답 : {}\n".format(predict, correct))
+            y_pred.append(predict)
+            y_true.append(correct)
+
+    print(score / all)
+    print(score)
+    print(all)
+    print(classification_report(y_true, y_pred))
+    file_path = os.path.join(config["output_dir_path"], "evaluate.txt")
+    with open(file_path, "a", encoding="UTF-8-sig") as f:
+        f.write("\n\n\n----------------------------\n\n\n")
+        f.write("epoch-{}".format(epoch))
+        f.write(y)
 
 def test(config):
     # BERT config 객체 생성
@@ -366,15 +448,16 @@ if (__name__ == "__main__"):
 
     config = {"mode": "train",
               "train_data_path": os.path.join("combined_data_train_10000.json"),
-              "test_data_path": os.path.join("combined_data_test_re.json"),
+              "test_data_path": os.path.join("combined_data_test_100.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
               "pretrained_model_name_or_path": "./model/bert-base/",
               "label_vocab_data_path": os.path.join("label_vocab.txt"),
               "num_labels": 9,
               "max_length": 512,
-              "epoch": 10,
-              "batch_size": 64
+              "epoch": 5,
+              "batch_size": 64,
+              "checkpoint_path":None
               }
 
     if (config["mode"] == "train"):

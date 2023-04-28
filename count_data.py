@@ -1,6 +1,6 @@
 import json
 # Load the JSON data
-with open('combined_data_test_re.json', 'r', encoding='utf-8-sig') as f:
+with open('combined_data_test_100.json', 'r', encoding='utf-8-sig') as f:
     data = json.load(f)
 
 # Initialize a counter variable

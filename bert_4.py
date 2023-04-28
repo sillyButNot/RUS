@@ -11,11 +11,11 @@ from transformers import AutoModel, AutoTokenizer
 from transformers import BertConfig
 from tokenization_kobert import KoBertTokenizer
 from torch.utils.data import SequentialSampler
+from tqdm import tqdm
 
 import torch.nn as nn
 from transformers import BertPreTrainedModel, BertModel
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
-
 
 class SentimentClassifier(BertPreTrainedModel):
 
@@ -24,30 +24,73 @@ class SentimentClassifier(BertPreTrainedModel):
 
         # BERT 모델
         self.bert = BertModel(config)
-
+        self.max_length = 512
         # 히든 사이즈
         self.hidden_size = config.hidden_size
 
         # 분류할 라벨의 개수
         self.num_labels = config.num_labels
 
+        # 주제를 랜덤으로 라벨임베딩해줌
+        self.label_embedding_matrix = nn.Parameter(
+            torch.randn(size=(self.num_labels, self.hidden_size,), dtype=torch.float32, requires_grad=True))
+
+        self.first_multi_head_attention = nn.MultiheadAttention(embed_dim=self.hidden_size, num_heads=8,
+                                                                batch_first=True)
+
         self.linear = nn.Linear(in_features=self.hidden_size, out_features=self.num_labels)
+        self.log_softmax = nn.functional.log_softmax
 
     def forward(self, input_ids):
+        batch_size = input_ids.size()[0]
+
         outputs = self.bert(input_ids=input_ids)
 
         # BERT 출력에서 CLS에 대응하는 벡터 표현 추출
         # 선형 함수를 사용하여 예측 확률 분포로 변환
+
         # (batch_size, max_lenth, hidden_size)
         bert_output = outputs[0]
 
-        # (batch_size, hidden_size)
-        cls_vector = bert_output[:, 0, :]
+        # (num_labels, hidden) -> (1. num_labels, hidden)
+        label_embedding = self.label_embedding_matrix.clone().unsqueeze(dim=0)
 
-        # class_output : (batch_size, num_labels)
-        cls_output = self.linear(cls_vector)
+        # (1,number_labels, hidden) -> (batch, num_labels, hidden)
+        label_embedding = label_embedding.repeat(batch_size, 1, 1)
 
-        return cls_output
+        # 패딩 마스크
+        # (batch_size, max_lenth, hidden_size) -> (batch_size, max_length)
+
+        padding_mask = (input_ids != 0).float()
+        padding_mask = padding_mask.unsqueeze(dim=-1)
+
+        padding_mask = padding_mask.repeat(1, 1, self.num_labels)
+
+        # (batch, max_length, hidden)
+        # first_attention_outputs : (batch, max_length, hidden)
+        # first_attention_weights : (batch, max_length, num_labels)
+        first_attention_outputs, first_attention_weights = self.first_multi_head_attention(
+            query=bert_output,
+            key=label_embedding,
+            value=label_embedding)
+
+        # (batch, max_length, hidden) -> (batch, max_length, num_labels)
+        linear_output = self.linear(first_attention_outputs)
+
+        # (batch, max_length, num_labels)
+        probs = self.log_softmax(linear_output, dim=-1)
+
+        # (batch_size, max_length) -> (batch_size, max_length, labels)
+        # padding_mask = padding_mask.repeat(1, 1,self.num_labels)
+        probs = probs * padding_mask
+
+        # 안되면 sum 말고 average
+        # (batch, current_length, num_labels) -> (batch, num_labels)
+        topics = probs.sum(dim=1)
+        max_length = int(padding_mask.sum(dim=1).max().item())
+        topics = topics / max_length
+
+        return topics
 
 
 def read_data(file_path, bert_tokenizer):
@@ -55,7 +98,7 @@ def read_data(file_path, bert_tokenizer):
         data = json.load(f)
     datas = []
     person_data = []
-    for item in data['data']:
+    for item in tqdm(data['data'], desc='read_data'):
         if 'topic' in item:
             topic = item['topic']
 
@@ -93,7 +136,7 @@ def read_vocab_data(vocab_data_path):
 def convert_data2feature(datas, max_length, tokenizer, label2idx, personal):
     input_ids_features, label_id_features = [], []
     x = 0
-    for input_sequence, label in datas:
+    for input_sequence, label in tqdm(datas, desc='convert_data2feature'):
         # CLS, SEP 토큰 추가
         y = 0
         tokens = tokenizer.convert_tokens_to_ids([tokenizer.cls_token])
@@ -166,7 +209,7 @@ def train(config):
                                                 cache_dir=config["cache_dir_path"], config=bert_config).cuda()
 
     # loss를 계산하기 위한 함수
-    loss_func = nn.CrossEntropyLoss()
+    loss_func = nn.NLLLoss()
 
     # 모델 학습을 위한 optimizer
     optimizer = optim.Adam(model.parameters(), lr=2e-5)
@@ -174,7 +217,7 @@ def train(config):
         model.train()
 
         total_loss = []
-        for batch in train_dataloader:
+        for step, batch in enumerate(train_dataloader):
             batch = tuple(t.cuda() for t in batch)
             input_ids, label_id = batch
 
@@ -184,6 +227,7 @@ def train(config):
             # hypothesis : [batch, num_labels]
             # 모델 예측 결과
 
+            # (batch, num_labels)
             hypothesis = model(input_ids)
 
             # loss 계산
@@ -197,10 +241,26 @@ def train(config):
             # batch 단위 loss 값 저장
             total_loss.append(loss.data.item())
 
-        bert_config.save_pretrained(save_directory=config["output_dir_path"])
-        model.save_pretrained(save_directory=config["output_dir_path"])
+            print("Epoch [{}/{}], Batch [{}/{}], Loss: {:.4f}".format(epoch + 1, config["epoch"], step + 1,
+                                                                      len(train_dataloader), loss.item()))
 
-        print("Average loss : {}".format(np.mean(total_loss)))
+            if args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                # 모델 저장 디렉토리 생성
+                output_dir = os.path.join(config["output_dir_path"], "checkpoint")
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+
+                # 학습된 가중치 및 vocab 저장
+                model.save_pretrained(save_directory=output_dir)
+                bert_config.save_pretrained(output_dir)
+                torch.save(args, os.path.join(output_dir, "training_args.bin"))
+                logger.info("Saving model checkpoint to %s", output_dir)
+
+        save_dir = os.path.join(config["output_dir_path"], "epoch-", epoch)
+        bert_config.save_pretrained(save_directory=save_dir)
+        model.save_pretrained(save_directory=save_dir)
+
+        print("Epoch [{}/{}], Average loss : {:.4f}".format(epoch + 1, config["epoch"], np.mean(total_loss)))
 
 
 def test(config):
@@ -284,8 +344,9 @@ def test(config):
     print(all)
     print(classification_report(y_true, y_pred))
 
+
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output_10000")
+    output_dir = os.path.join("output_4")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -293,8 +354,8 @@ if (__name__ == "__main__"):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
-    config = {"mode": "test",
-              "train_data_path": os.path.join("combined_data_train_10000.json"),
+    config = {"mode": "train",
+              "train_data_path": os.path.join("combined_data_train_dev.json"),
               "test_data_path": os.path.join("combined_data_test_re.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,

@@ -11,9 +11,11 @@ from transformers import AutoModel, AutoTokenizer
 from transformers import BertConfig
 from tokenization_kobert import KoBertTokenizer
 from torch.utils.data import SequentialSampler
-import torch.nn.functional as F
-from transformers import BertPreTrainedModel, BertModel
 from tqdm import tqdm
+
+import torch.nn as nn
+from transformers import BertPreTrainedModel, BertModel
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
 
 class SentimentClassifier(BertPreTrainedModel):
@@ -216,7 +218,7 @@ def train(config):
         model.train()
 
         total_loss = []
-        for i,batch in enumerate(train_dataloader):
+        for step, batch in enumerate(train_dataloader):
             batch = tuple(t.cuda() for t in batch)
             input_ids, label_id = batch
 
@@ -240,12 +242,16 @@ def train(config):
             # batch 단위 loss 값 저장
             total_loss.append(loss.data.item())
 
-            print("Epoch [{}/{}], Batch [{}/{}], Loss: {:.4f}".format(epoch + 1, config["epoch"], i + 1, len(train_dataloader), loss.item()))
-        bert_config.save_pretrained(save_directory=config["output_dir_path"])
-        model.save_pretrained(save_directory=config["output_dir_path"])
+            print("Epoch [{}/{}], Batch [{}/{}], Loss: {:.4f}".format(epoch + 1, config["epoch"], step + 1,
+                                                                      len(train_dataloader), loss.item()))
+
+
+        save_dir = os.path.join(config["output_dir_path"], "epoch-", epoch)
+        bert_config.save_pretrained(save_directory=save_dir)
+        model.save_pretrained(save_directory=save_dir)
 
         print("Epoch [{}/{}], Average loss : {:.4f}".format(epoch + 1, config["epoch"], np.mean(total_loss)))
-
+        test(config)
 
 def test(config):
     # BERT config 객체 생성
@@ -281,6 +287,9 @@ def test(config):
     model.eval()
     score = 0
     all = 0
+    y_true = []
+    y_pred = []
+
     for batch in test_dataloader:
         batch = tuple(t.cuda() for t in batch)
         input_ids, label_id = batch
@@ -314,17 +323,20 @@ def test(config):
             all = all + 1
             if (predict == correct):
                 score = score + 1
-            else:
-                print("입력 : {}".format(input_sequence))
-                print("출력 : {}, 정답 : {}\n".format(predict, correct))
+            # else:
+            #     print("입력 : {}".format(input_sequence))
+            #     print("출력 : {}, 정답 : {}\n".format(predict, correct))
+            y_pred.append(predict)
+            y_true.append(correct)
 
     print(score / all)
     print(score)
     print(all)
+    print(classification_report(y_true, y_pred))
 
 
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output_attention")
+    output_dir = os.path.join("output_3")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -342,7 +354,7 @@ if (__name__ == "__main__"):
               "num_labels": 9,
               "max_length": 512,
               "epoch": 10,
-              "batch_size": 32
+              "batch_size": 64
               }
 
     if (config["mode"] == "train"):

@@ -11,8 +11,10 @@ from transformers import AutoModel, AutoTokenizer
 from transformers import BertConfig
 from tokenization_kobert import KoBertTokenizer
 from torch.utils.data import SequentialSampler
-import torch.nn.functional as F
+
+import torch.nn as nn
 from transformers import BertPreTrainedModel, BertModel
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
 
 class SentimentClassifier(BertPreTrainedModel):
@@ -280,6 +282,9 @@ def test(config):
     model.eval()
     score = 0
     all = 0
+    y_true = []
+    y_pred = []
+
     for batch in test_dataloader:
         batch = tuple(t.cuda() for t in batch)
         input_ids, label_id = batch
@@ -313,17 +318,20 @@ def test(config):
             all = all + 1
             if (predict == correct):
                 score = score + 1
-            else:
-                print("입력 : {}".format(input_sequence))
-                print("출력 : {}, 정답 : {}\n".format(predict, correct))
+            # else:
+            #     print("입력 : {}".format(input_sequence))
+            #     print("출력 : {}, 정답 : {}\n".format(predict, correct))
+            y_pred.append(predict)
+            y_true.append(correct)
 
     print(score / all)
     print(score)
     print(all)
+    print(classification_report(y_true, y_pred))
 
 
 if (__name__ == "__main__"):
-    output_dir = os.path.join("output_attention")
+    output_dir = os.path.join("output_2")
     cache_dir = os.path.join("cache")
 
     if not os.path.exists(output_dir):
@@ -331,7 +339,7 @@ if (__name__ == "__main__"):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
 
-    config = {"mode": "train",
+    config = {"mode": "test",
               "train_data_path": os.path.join("combined_data_train_10000.json"),
               "test_data_path": os.path.join("combined_data_test_re.json"),
               "output_dir_path": output_dir,

@@ -246,12 +246,12 @@ def train(config):
                                                                       len(train_dataloader), loss.item()))
 
 
-        save_dir = os.path.join(config["output_dir_path"], "epoch-", epoch)
+        save_dir = os.path.join(config["output_dir_path"], "epoch-{}".format(epoch+1))
         bert_config.save_pretrained(save_directory=save_dir)
         model.save_pretrained(save_directory=save_dir)
 
         print("Epoch [{}/{}], Average loss : {:.4f}".format(epoch + 1, config["epoch"], np.mean(total_loss)))
-        test(config)
+        # test(config)
 
 def test(config):
     # BERT config 객체 생성
@@ -346,7 +346,7 @@ if (__name__ == "__main__"):
 
     config = {"mode": "train",
               "train_data_path": os.path.join("combined_data_train_10000.json"),
-              "test_data_path": os.path.join("combined_data_test_re.json"),
+              "test_data_path": os.path.join("combined_data_test_100.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
               "pretrained_model_name_or_path": "./model/bert-base/",

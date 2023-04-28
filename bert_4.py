@@ -74,6 +74,16 @@ class SentimentClassifier(BertPreTrainedModel):
             key=label_embedding,
             value=label_embedding)
 
+        #상위 3개 값만 놔두고 나머지 확률값은 0으로 만듬
+        topk_values, topk_indices = torch.topk(first_attention_weights, k=3, dim=-1)
+
+        # set all values in first_attention_weights to 0
+        first_attention_weights.zero_()
+
+        # set the top 3 values in each row to their original values
+        first_attention_weights.scatter_(-1, topk_indices, topk_values)
+
+
         # (batch, max_length, hidden) -> (batch, max_length, num_labels)
         linear_output = self.linear(first_attention_outputs)
 
@@ -355,7 +365,7 @@ if (__name__ == "__main__"):
         os.makedirs(cache_dir)
 
     config = {"mode": "train",
-              "train_data_path": os.path.join("combined_data_train_dev.json"),
+              "train_data_path": os.path.join("combined_data_train_10000.json"),
               "test_data_path": os.path.join("combined_data_test_re.json"),
               "output_dir_path": output_dir,
               "cache_dir_path": cache_dir,
@@ -364,7 +374,7 @@ if (__name__ == "__main__"):
               "num_labels": 9,
               "max_length": 512,
               "epoch": 10,
-              "batch_size": 32
+              "batch_size": 64
               }
 
     if (config["mode"] == "train"):
